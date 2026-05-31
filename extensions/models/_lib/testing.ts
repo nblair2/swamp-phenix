@@ -39,6 +39,7 @@ export function assertEquals<T>(actual: T, expected: T, msg?: string): void {
 interface ModelLike {
   type: string;
   version: string;
+  globalArguments?: { partial?: () => unknown };
   methods: Record<
     string,
     { description: string; arguments: { safeParse: (v: unknown) => unknown } }
@@ -60,6 +61,23 @@ export function assertModel(
 ): void {
   assert(model.type === type, `type ${model.type} !== ${type}`);
   assert(/^\d{4}\.\d{2}\.\d{2}\.\d+$/.test(model.version), "version is CalVer");
+  // swamp calls `.partial()` on `globalArguments` at method-execution time,
+  // which throws on a refined object (`z.object(...).refine(...)`). Guard that
+  // the schema stays a plain ZodObject so the bug is caught here, in CI, rather
+  // than only at `swamp model method run`.
+  const ga = model.globalArguments;
+  assert(
+    typeof ga?.partial === "function",
+    "globalArguments must be a ZodObject (exposing .partial())",
+  );
+  try {
+    ga!.partial!();
+  } catch (e) {
+    throw new Error(
+      `globalArguments must be .partial()-able — avoid .refine()/.transform() ` +
+        `on the global-args schema (swamp calls .partial() on it): ${e}`,
+    );
+  }
   for (const name of methodNames) {
     assert(name in model.methods, `missing method ${name}`);
   }
