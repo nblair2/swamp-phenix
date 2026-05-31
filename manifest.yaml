@@ -1,14 +1,15 @@
 manifestVersion: 1
 name: "@nblair2/phenix"
-version: "2026.05.31.2"
+version: "2026.05.31.3"
 description: >
-  Full sceptre-phenix control via the HTTP API, split into five models — config,
-  experiment, vm, cluster and user: config CRUD
+  Full sceptre-phenix control via the HTTP API, split into six models — config,
+  experiment, scorch, vm, cluster and user: config CRUD
   (Topology/Scenario/Experiment/Image/User), the experiment lifecycle
   (create/start/stop/delete, schedule, apps, topology, files, trigger),
-  VM control (inventory, reconfigure, power, snapshots, captures, commit), and
-  cluster/server reads (hosts, disks, apps, topologies, version, features,
-  settings) plus identity (users, roles, long-lived tokens).
+  scorch run control (start, poll-to-completion, status, cancel, output
+  tarballs), VM control (inventory, reconfigure, power, snapshots, captures,
+  commit), and cluster/server reads (hosts, disks, apps, topologies, version,
+  features, settings) plus identity (users, roles, long-lived tokens).
 repository: "https://github.com/nblair2/swamp-phenix"
 labels:
   - phenix
@@ -25,6 +26,7 @@ labels:
 models:
   - config.ts
   - experiment.ts
+  - scorch.ts
   - vm.ts
   - cluster.ts
   - user.ts

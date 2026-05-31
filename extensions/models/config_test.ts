@@ -12,7 +12,7 @@ import {
   harness,
   jsonResponse,
 } from "./_lib/testing.ts";
-import type { ReadFileLike } from "./_lib/phenix.ts";
+import type { ReadDirLike, ReadFileLike } from "./_lib/phenix.ts";
 
 Deno.test("config model identity and shape", () => {
   assertModel(
@@ -22,6 +22,7 @@ Deno.test("config model identity and shape", () => {
       "config_list",
       "config_get",
       "config_create",
+      "config_upload_dir",
       "config_update",
       "config_delete",
     ],
@@ -47,6 +48,37 @@ Deno.test("config_create from a file POSTs the raw document as YAML", async () =
   assertEquals(written[0].specName, "config");
   assertEquals(written[0].instanceName, "config-topology-topo1");
   assertEquals(result.dataHandles.length, 1);
+});
+
+Deno.test("config_upload_dir POSTs every yaml/json file in the directory", async () => {
+  const files: Record<string, string> = {
+    "/r/topology-base.yml": "kind: Topology\nmetadata:\n  name: base\n",
+    "/r/scenarioA.yml": "kind: Scenario\nmetadata:\n  name: scnA\n",
+    "/r/notes.txt": "ignore me",
+  };
+  const readDir: ReadDirLike = (_p) =>
+    Promise.resolve(["topology-base.yml", "scenarioA.yml", "notes.txt"]);
+  const readFile: ReadFileLike = (p) =>
+    Promise.resolve(new TextEncoder().encode(files[p] ?? ""));
+  const posted: string[] = [];
+  const { context, written } = harness(
+    (c) => {
+      if (c.method === "POST") posted.push(String(c.raw));
+      return jsonResponse(201, {});
+    },
+    readFile,
+    readDir,
+  );
+  const result = await model.methods.config_upload_dir.execute(
+    { dir: "/r" },
+    context,
+  );
+  // Only the two config files are uploaded (notes.txt skipped), sorted by name.
+  assertEquals(posted.length, 2);
+  assert(posted[0].includes("name: scnA"), "scenarioA.yml uploaded");
+  assert(posted[1].includes("name: base"), "topology-base.yml uploaded");
+  assertEquals(result.dataHandles.length, 2);
+  assertEquals(written.length, 2);
 });
 
 Deno.test("config_create rejects supplying both config and file", () => {

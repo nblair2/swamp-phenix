@@ -102,6 +102,26 @@ Deno.test("connect with a token does not call login and sends the bearer header"
   );
 });
 
+// --- basePath: reverse-proxy path prefix is prepended (slashes normalized) ---
+
+Deno.test("basePath prefixes every request path and normalizes slashes", async () => {
+  const calls: string[] = [];
+  const fetchStub: FetchLike = (input) => {
+    calls.push(input);
+    return Promise.resolve(jsonResponse(200, { ok: true }));
+  };
+  const proxied: PhenixGlobalArgs = {
+    ...tokenCfg,
+    basePath: "/igor/fl-recon-A/phenix/",
+  };
+  const client = await connect(proxied, { fetch: fetchStub });
+  await client.get("/api/v1/experiments");
+  assertEquals(
+    calls[0],
+    "https://phenix.test:3000/igor/fl-recon-A/phenix/api/v1/experiments",
+  );
+});
+
 // --- auth: login path reads token from the body ---
 
 Deno.test("connect with a password logs in and uses the returned token", async () => {

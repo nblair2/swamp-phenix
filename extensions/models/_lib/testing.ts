@@ -10,7 +10,12 @@
  *
  * @module
  */
-import type { FetchLike, PhenixGlobalArgs, ReadFileLike } from "./phenix.ts";
+import type {
+  FetchLike,
+  PhenixGlobalArgs,
+  ReadDirLike,
+  ReadFileLike,
+} from "./phenix.ts";
 
 /** Connection args used by every test (token auth, no real server). */
 export const cfg: PhenixGlobalArgs = {
@@ -129,6 +134,7 @@ export interface Captured {
 export function harness(
   handler: (c: Captured) => Response,
   readFile?: ReadFileLike,
+  readDir?: ReadDirLike,
 ) {
   const written: Written[] = [];
   const calls: Captured[] = [];
@@ -155,7 +161,7 @@ export function harness(
   };
   const context = {
     globalArgs: cfg,
-    _deps: { fetch: fetchStub, readFile },
+    _deps: { fetch: fetchStub, readFile, readDir },
     writeResource: (specName: string, instanceName: string, data: unknown) => {
       written.push({ specName, instanceName, data });
       return Promise.resolve({

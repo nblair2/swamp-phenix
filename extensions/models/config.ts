@@ -16,6 +16,7 @@ import {
   ConfigSchema,
   configsFromData,
   GlobalArgsSchema,
+  type ReadDirLike,
   type ReadFileLike,
 } from "./_lib/phenix.ts";
 import {
@@ -58,11 +59,26 @@ async function readConfigFile(
   return { text, contentType };
 }
 
+/** Default directory lister: the `.yml`/`.yaml`/`.json` file names in `path`. */
+const defaultReadDir: ReadDirLike = async (path) => {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(path)) {
+    if (entry.isFile) names.push(entry.name);
+  }
+  return names;
+};
+
 const KindNameArgs = z.object({
   kind: z.string().min(1).describe(
     "Config kind: Topology, Scenario, Experiment, Image, or User",
   ),
   name: z.string().min(1).describe("Config name (metadata.name)"),
+});
+
+const UploadDirArgs = z.object({
+  dir: z.string().min(1).describe(
+    "Local directory whose .yml/.yaml/.json config documents are all uploaded",
+  ),
 });
 
 const UpsertArgs = z.object({
@@ -167,6 +183,45 @@ const methods = {
     },
   },
 
+  config_upload_dir: {
+    description:
+      "Upload every .yml/.yaml/.json config document in a local directory " +
+      "(one locked call instead of one per file), storing each created config",
+    arguments: UploadDirArgs,
+    execute: async (
+      args: z.infer<typeof UploadDirArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
+      const client = await clientFor(context);
+      const readFile = context._deps?.readFile ?? Deno.readFile;
+      const readDir = context._deps?.readDir ?? defaultReadDir;
+      const dir = args.dir.replace(/\/+$/, "");
+      const files = (await readDir(dir))
+        .filter((n) => /\.(ya?ml|json)$/i.test(n))
+        .sort();
+      if (files.length === 0) {
+        throw new Error(`no config files (.yml/.yaml/.json) found in '${dir}'`);
+      }
+      const handles = [];
+      for (const file of files) {
+        const { text, contentType } = await readConfigFile(
+          `${dir}/${file}`,
+          readFile,
+        );
+        const res = await client.postRaw("/api/v1/configs", text, contentType);
+        const created = asObject(res.body);
+        handles.push(
+          await context.writeResource(
+            "config",
+            instKey(configKey(created)),
+            Object.keys(created).length > 0 ? created : { file },
+          ),
+        );
+      }
+      return { dataHandles: handles };
+    },
+  },
+
   config_update: {
     description:
       "Replace an existing config (by kind/name) from an inline object or file",
@@ -221,7 +276,7 @@ const methods = {
 /** The `@nblair2/phenix/config` model. */
 export const model = {
   type: "@nblair2/phenix/config",
-  version: "2026.05.31.2",
+  version: "2026.05.31.3",
   globalArguments: GlobalArgsSchema,
   resources: {
     config: {

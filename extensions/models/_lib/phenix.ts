@@ -51,6 +51,12 @@ export const GlobalArgsSchema = z.object({
     "PEM-encoded CA certificate to trust when the phenix server uses a " +
       "self-signed or private-CA certificate",
   ),
+  basePath: z.string().optional().describe(
+    "Optional URL path prefix for when phenix is served behind a " +
+      "path-rewriting reverse proxy (e.g. 'igor/<reservation>/phenix' makes " +
+      "requests go to https://host/igor/<reservation>/phenix/api/v1/...). " +
+      "Leading/trailing slashes are ignored; omit for a direct host:port server.",
+  ),
 });
 // NOTE: the "token, or username+password" rule is enforced at runtime in
 // `connect()` rather than with a Zod `.refine()` here. swamp calls `.partial()`
@@ -89,12 +95,17 @@ export type FetchLike = (
 /** Reads a file's bytes; defaults to `Deno.readFile`, overridable in tests. */
 export type ReadFileLike = (path: string) => Promise<Uint8Array>;
 
+/** Lists a directory's file names; defaults to `Deno.readDir`, overridable in tests. */
+export type ReadDirLike = (path: string) => Promise<string[]>;
+
 /** Optional dependencies, primarily for testing. */
 export interface PhenixDeps {
   /** Override the global `fetch` (used to stub HTTP in unit tests). */
   fetch?: FetchLike;
   /** Override file reading (used to stub config-file uploads in unit tests). */
   readFile?: ReadFileLike;
+  /** Override directory listing (used to stub config-dir uploads in unit tests). */
+  readDir?: ReadDirLike;
 }
 
 /** Query-string values: scalars or arrays (arrays repeat the key). */
@@ -148,11 +159,18 @@ export interface PhenixClient {
   ): Promise<ApiResult>;
 }
 
-/** Build the server root URL (`<scheme>://host:port`) for a connection. */
+/**
+ * Build the server root URL for a connection: `<scheme>://host:port` plus an
+ * optional `basePath` prefix (for a path-rewriting reverse proxy). Leading and
+ * trailing slashes on `basePath` are normalized away, so `igor/r/phenix`,
+ * `/igor/r/phenix` and `igor/r/phenix/` all yield `…:port/igor/r/phenix`.
+ */
 export function baseUrl(
-  cfg: Pick<PhenixGlobalArgs, "host" | "port" | "scheme">,
+  cfg: Pick<PhenixGlobalArgs, "host" | "port" | "scheme" | "basePath">,
 ): string {
-  return `${cfg.scheme}://${cfg.host}:${cfg.port}`;
+  const root = `${cfg.scheme}://${cfg.host}:${cfg.port}`;
+  const prefix = (cfg.basePath ?? "").trim().replace(/^\/+|\/+$/g, "");
+  return prefix ? `${root}/${prefix}` : root;
 }
 
 /** Append query parameters to a URL, repeating keys for array values. */
