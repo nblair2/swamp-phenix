@@ -1,30 +1,30 @@
 /**
- * Per-experiment VM control for the `@nblair2/phenix` model: inventory
- * (list / get), reconfiguration (update / redeploy), power state
+ * The `@nblair2/phenix/vm` model: VM control across phenix experiments —
+ * inventory (list / get, plus `vm_list_all` across every experiment),
+ * reconfiguration (update / redeploy), power state
  * (start / stop / shutdown / restart / reset), and disk/capture operations
  * (snapshots, commit, packet captures). VM state is stored keyed by
- * `<experiment>-<vm>`.
+ * `<experiment>-<vm>`. Connection details are configured once via the model's
+ * global arguments; the HTTP client and shared plumbing live in `./_lib/`.
  *
  * @module
  */
 import { z } from "npm:zod@4.3.6";
 import {
   asObject,
+  GlobalArgsSchema,
   type PhenixClient,
   VMSchema,
   vmsFromData,
-} from "../_lib/phenix.ts";
+} from "./_lib/phenix.ts";
 import {
   clientFor,
-  defineMethod,
   inst,
-  type MethodDef,
   type MethodResult,
   type ModelContext,
-  operationResource,
-  type ResourceSpec,
+  operationSchema,
   writeOperation,
-} from "../_lib/model.ts";
+} from "./_lib/model.ts";
 
 const PREFIX = "vm";
 
@@ -75,7 +75,9 @@ const ExpVMArgs = z.object({
   name: z.string().min(1).describe("VM name"),
 });
 
-const UpdateArgs = ExpVMArgs.extend({
+const UpdateArgs = z.object({
+  exp: z.string().min(1).describe("Experiment name"),
+  name: z.string().min(1).describe("VM name"),
   cpus: z.number().int().positive().optional().describe("Number of vCPUs"),
   ram: z.number().int().positive().optional().describe("RAM in MB"),
   disk: z.string().optional().describe("Disk image path"),
@@ -91,22 +93,30 @@ const UpdateArgs = ExpVMArgs.extend({
   ),
 });
 
-const RedeployArgs = ExpVMArgs.extend({
+const RedeployArgs = z.object({
+  exp: z.string().min(1).describe("Experiment name"),
+  name: z.string().min(1).describe("VM name"),
   cpus: z.number().int().positive().optional().describe("Number of vCPUs"),
   ram: z.number().int().positive().optional().describe("RAM in MB"),
   disk: z.string().optional().describe("Disk image path"),
   injects: z.boolean().optional().describe("Re-run file injections"),
 });
 
-const SnapshotArgs = ExpVMArgs.extend({
+const SnapshotArgs = z.object({
+  exp: z.string().min(1).describe("Experiment name"),
+  name: z.string().min(1).describe("VM name"),
   filename: z.string().min(1).describe("Snapshot filename"),
 });
 
-const RestoreArgs = ExpVMArgs.extend({
+const RestoreArgs = z.object({
+  exp: z.string().min(1).describe("Experiment name"),
+  name: z.string().min(1).describe("VM name"),
   snapshot: z.string().min(1).describe("Snapshot name to restore"),
 });
 
-const CaptureArgs = ExpVMArgs.extend({
+const CaptureArgs = z.object({
+  exp: z.string().min(1).describe("Experiment name"),
+  name: z.string().min(1).describe("VM name"),
   interface: z.number().int().nonnegative().describe(
     "Interface index to capture on",
   ),
@@ -127,23 +137,14 @@ function updateBody(a: z.infer<typeof UpdateArgs>): Record<string, unknown> {
   return body;
 }
 
-/** Resource specs owned by this group. */
-export const resources: Record<string, ResourceSpec> = {
-  vm: {
-    description: "A VM within a phenix experiment and its current state",
-    schema: VMSchema,
-    lifetime: "infinite",
-    garbageCollection: 20,
-  },
-  operation: operationResource,
-};
-
-/** Methods contributed by this group. */
-export const methods: Record<string, MethodDef> = {
-  vm_list: defineMethod({
+const methods = {
+  vm_list: {
     description: "List all VMs in an experiment, storing each one",
     arguments: ExpArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/experiments/${encodeURIComponent(args.exp)}/vms`,
@@ -154,25 +155,50 @@ export const methods: Record<string, MethodDef> = {
       }
       return { dataHandles: handles };
     },
-  }),
+  },
 
-  vm_get: defineMethod({
+  vm_list_all: {
+    description:
+      "List every VM across all experiments, storing each as a `vm` resource",
+    arguments: z.object({}),
+    execute: async (
+      _args: Record<string, never>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
+      const client = await clientFor(context);
+      const res = await client.get("/api/v1/vms");
+      const handles = [];
+      for (const vm of vmsFromData(res.body)) {
+        const exp = typeof vm.experiment === "string" ? vm.experiment : "_";
+        handles.push(await writeVM(context, exp, vm));
+      }
+      return { dataHandles: handles };
+    },
+  },
+
+  vm_get: {
     description: "Fetch a single VM by name and store its state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(vmPath(args.exp, args.name));
       const handle = await writeVM(context, args.exp, asObject(res.body));
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  vm_update: defineMethod({
+  vm_update: {
     description:
       "Update a VM's CPUs/RAM/disk, do-not-boot flag, host pin, snapshot " +
       "mode, an interface VLAN, or tags",
     arguments: UpdateArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof UpdateArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const body = updateBody(args);
       if (Object.keys(body).length === 0) {
@@ -181,63 +207,81 @@ export const methods: Record<string, MethodDef> = {
       const res = await client.patch(vmPath(args.exp, args.name), body);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_start: defineMethod({
+  vm_start: {
     description: "Boot a VM, then store its updated state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(`${vmPath(args.exp, args.name)}/start`);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_stop: defineMethod({
+  vm_stop: {
     description: "Power off (pause) a VM, then store its updated state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(`${vmPath(args.exp, args.name)}/stop`);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_shutdown: defineMethod({
+  vm_shutdown: {
     description: "Gracefully shut down a VM's guest OS, then store its state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(`${vmPath(args.exp, args.name)}/shutdown`);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_restart: defineMethod({
+  vm_restart: {
     description: "Restart a VM, then store its updated state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(`${vmPath(args.exp, args.name)}/restart`);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_reset: defineMethod({
+  vm_reset: {
     description: "Hard-reset a VM, then store its updated state",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(`${vmPath(args.exp, args.name)}/reset`);
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_redeploy: defineMethod({
+  vm_redeploy: {
     description:
       "Redeploy a VM (optionally with new CPUs/RAM/disk and re-injection)",
     arguments: RedeployArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof RedeployArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const body: Record<string, unknown> = { name: args.name };
       if (args.cpus !== undefined) body.cpus = args.cpus;
@@ -250,12 +294,15 @@ export const methods: Record<string, MethodDef> = {
       );
       return storeVMResult(client, context, args.exp, args.name, res.body);
     },
-  }),
+  },
 
-  vm_snapshot_list: defineMethod({
+  vm_snapshot_list: {
     description: "List the disk snapshots available for a VM",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(`${vmPath(args.exp, args.name)}/snapshots`);
       return writeOperation(context, "vm_snapshot_list", {
@@ -263,12 +310,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  vm_snapshot_create: defineMethod({
+  vm_snapshot_create: {
     description: "Create a disk snapshot of a VM",
     arguments: SnapshotArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof SnapshotArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(
         `${vmPath(args.exp, args.name)}/snapshots`,
@@ -280,12 +330,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  vm_snapshot_restore: defineMethod({
+  vm_snapshot_restore: {
     description: "Restore a VM from a named disk snapshot",
     arguments: RestoreArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof RestoreArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(
         `${vmPath(args.exp, args.name)}/snapshots/${
@@ -298,12 +351,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  vm_commit: defineMethod({
+  vm_commit: {
     description: "Commit a VM's current disk state to a new backing image",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(`${vmPath(args.exp, args.name)}/commit`);
       return writeOperation(context, "vm_commit", {
@@ -311,12 +367,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  vm_capture_start: defineMethod({
+  vm_capture_start: {
     description: "Start a packet capture on a VM interface",
     arguments: CaptureArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof CaptureArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const body: Record<string, unknown> = { interface: args.interface };
       if (args.filter !== undefined) body.filter = args.filter;
@@ -329,12 +388,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  vm_capture_stop: defineMethod({
+  vm_capture_stop: {
     description: "Stop all packet captures on a VM",
     arguments: ExpVMArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ExpVMArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.del(`${vmPath(args.exp, args.name)}/captures`);
       return writeOperation(context, "vm_capture_stop", {
@@ -342,5 +404,28 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
+};
+
+/** The `@nblair2/phenix/vm` model. */
+export const model = {
+  type: "@nblair2/phenix/vm",
+  version: "2026.05.30.2",
+  globalArguments: GlobalArgsSchema,
+  resources: {
+    vm: {
+      description: "A VM within a phenix experiment and its current state",
+      schema: VMSchema,
+      lifetime: "infinite",
+      garbageCollection: 20,
+    },
+    operation: {
+      description:
+        "Outcome of a one-shot phenix action (snapshot, commit, capture, etc.)",
+      schema: operationSchema,
+      lifetime: "7d",
+      garbageCollection: 10,
+    },
+  },
+  methods,
 };

@@ -2,15 +2,18 @@
 /**
  * Release-version helper for the `@nblair2/phenix` extension.
  *
- * The published version lives in two places that must agree: the `version` in
- * `manifest.yaml` (what the registry publishes) and the `version` field of the
- * exported `model` in `extensions/models/phenix.ts`. This script is the single
- * source of truth for keeping them in lock-step. It is intentionally kept
- * outside `extensions/` so it never becomes part of the published bundle.
+ * The published version lives in several places that must agree: the `version`
+ * in `manifest.yaml` (what the registry publishes) and the `version` literal in
+ * each of the five model files under `extensions/models/` (`config.ts`,
+ * `experiment.ts`, `vm.ts`, `cluster.ts`, `user.ts`). The registry parses each
+ * model's `version` from its source as a string literal, so it cannot be a
+ * shared constant — every model carries its own copy. This script keeps them
+ * all in lock-step. It is kept outside `extensions/` so it never becomes part
+ * of the published bundle.
  *
  * Usage:
- *   deno task bump [version]   # write a new CalVer into both files
- *   deno task version:check    # assert the two files agree and are valid CalVer
+ *   deno task bump [version]   # write a new CalVer into the manifest + models
+ *   deno task version:check    # assert every file agrees and is valid CalVer
  *
  * `bump` with no argument asks `swamp extension version` for the next CalVer
  * (works unauthenticated); pass an explicit `YYYY.MM.DD.MICRO` to override.
@@ -19,7 +22,16 @@
  */
 const ROOT = `${import.meta.dirname}/..`;
 const MANIFEST = `${ROOT}/manifest.yaml`;
-const MODEL = `${ROOT}/extensions/models/phenix.ts`;
+const MODELS_DIR = `${ROOT}/extensions/models`;
+/** The model entry-point files, each carrying its own `version` literal. */
+const MODEL_FILES = [
+  "config.ts",
+  "experiment.ts",
+  "vm.ts",
+  "cluster.ts",
+  "user.ts",
+]
+  .map((f) => `${MODELS_DIR}/${f}`);
 
 const CALVER = /^(\d{4})\.(\d{2})\.(\d{2})\.(\d+)$/;
 
@@ -35,20 +47,36 @@ function isValidCalVer(v: string): boolean {
     date.getUTCDate() === day;
 }
 
-/** The `version: "..."` in `manifest.yaml` (top-level key). */
+/** The top-level `version: "..."` in `manifest.yaml`. */
 const MANIFEST_VERSION = /^version:\s*"([^"]+)"/m;
-/** The `version: "..."` field of the exported model in `phenix.ts`. */
+/** The `version: "..."` literal in a model's exported object. */
 const MODEL_VERSION = /^\s*version:\s*"([^"]+)"/m;
 
-/** Read the current version recorded in each file (null if not found). */
-async function readVersions(): Promise<
-  { manifest: string | null; model: string | null }
-> {
+/** A file path paired with the version literal found in it (or null). */
+interface FileVersion {
+  path: string;
+  label: string;
+  version: string | null;
+}
+
+/** Read the current version recorded in the manifest and every model file. */
+async function readVersions(): Promise<{
+  manifest: string | null;
+  models: FileVersion[];
+}> {
   const manifestText = await Deno.readTextFile(MANIFEST);
-  const modelText = await Deno.readTextFile(MODEL);
+  const models: FileVersion[] = [];
+  for (const path of MODEL_FILES) {
+    const text = await Deno.readTextFile(path);
+    models.push({
+      path,
+      label: `extensions/models/${path.split("/").pop()}`,
+      version: MODEL_VERSION.exec(text)?.[1] ?? null,
+    });
+  }
   return {
     manifest: MANIFEST_VERSION.exec(manifestText)?.[1] ?? null,
-    model: MODEL_VERSION.exec(modelText)?.[1] ?? null,
+    models,
   };
 }
 
@@ -103,55 +131,60 @@ function replaceVersion(
   );
 }
 
-/** Write `version` into both `manifest.yaml` and `phenix.ts`. */
+/** Write `version` into `manifest.yaml` and every model file. */
 async function bump(version: string): Promise<void> {
   if (!isValidCalVer(version)) {
     throw new Error(
       `'${version}' is not a valid CalVer (expected YYYY.MM.DD.MICRO naming a real date)`,
     );
   }
-  const { manifest: oldManifest, model: oldModel } = await readVersions();
+  const { manifest: oldManifest, models } = await readVersions();
 
   const manifestText = await Deno.readTextFile(MANIFEST);
   await Deno.writeTextFile(
     MANIFEST,
     replaceVersion(manifestText, MANIFEST_VERSION, version),
   );
-
-  const modelText = await Deno.readTextFile(MODEL);
-  await Deno.writeTextFile(
-    MODEL,
-    replaceVersion(modelText, MODEL_VERSION, version),
-  );
-
   console.log(`manifest.yaml: ${oldManifest} → ${version}`);
-  console.log(`phenix.ts:     ${oldModel} → ${version}`);
+
+  for (const m of models) {
+    const text = await Deno.readTextFile(m.path);
+    await Deno.writeTextFile(
+      m.path,
+      replaceVersion(text, MODEL_VERSION, version),
+    );
+    console.log(`${m.label}: ${m.version} → ${version}`);
+  }
 }
 
-/** Assert the two files agree and hold a valid CalVer; exit non-zero if not. */
+/** Assert the manifest and every model agree on a valid CalVer; exit 1 if not. */
 async function check(): Promise<void> {
-  const { manifest, model } = await readVersions();
+  const { manifest, models } = await readVersions();
   const problems: string[] = [];
+
   if (!manifest) problems.push("no version found in manifest.yaml");
-  if (!model) problems.push("no version found in extensions/models/phenix.ts");
   if (manifest && !isValidCalVer(manifest)) {
     problems.push(`manifest.yaml version '${manifest}' is not valid CalVer`);
   }
-  if (model && !isValidCalVer(model)) {
-    problems.push(`phenix.ts version '${model}' is not valid CalVer`);
+  for (const m of models) {
+    if (!m.version) {
+      problems.push(`no version found in ${m.label}`);
+    } else if (!isValidCalVer(m.version)) {
+      problems.push(`${m.label} version '${m.version}' is not valid CalVer`);
+    } else if (manifest && m.version !== manifest) {
+      problems.push(
+        `version mismatch: manifest.yaml is '${manifest}' but ${m.label} is ` +
+          `'${m.version}' — run \`deno task bump ${manifest}\` to sync them`,
+      );
+    }
   }
-  if (manifest && model && manifest !== model) {
-    problems.push(
-      `version mismatch: manifest.yaml is '${manifest}' but phenix.ts is ` +
-        `'${model}' — run \`deno task bump ${manifest}\` to sync them`,
-    );
-  }
+
   if (problems.length > 0) {
     console.error("version check failed:");
     for (const p of problems) console.error(`  - ${p}`);
     Deno.exit(1);
   }
-  console.log(`version OK: ${manifest}`);
+  console.log(`version OK: ${manifest} (manifest + ${models.length} models)`);
 }
 
 async function main(): Promise<void> {

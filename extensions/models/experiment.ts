@@ -1,9 +1,11 @@
 /**
- * Experiment lifecycle for the `@nblair2/phenix` model: list / get / create /
- * delete, start / stop, and the surrounding read-and-control endpoints
- * (apps, schedule, topology, files, trigger). Mutating endpoints reply `204`
- * and broadcast state over a websocket, so this group re-`GET`s the experiment
- * to capture and store its current state.
+ * The `@nblair2/phenix/experiment` model: the experiment lifecycle — list / get
+ * / create / delete, start / stop — and the surrounding read-and-control
+ * endpoints (apps, schedule, topology, files, trigger). Mutating endpoints
+ * reply `204` and broadcast state over a websocket, so these methods re-`GET`
+ * the experiment to capture and store its current state. Connection details are
+ * configured once via the model's global arguments; the HTTP client and shared
+ * plumbing live in `./_lib/`.
  *
  * @module
  */
@@ -11,21 +13,19 @@ import { z } from "npm:zod@4.3.6";
 import {
   asObject,
   ExperimentSchema,
+  experimentsFromData,
+  GlobalArgsSchema,
   type PhenixClient,
-} from "../_lib/phenix.ts";
+} from "./_lib/phenix.ts";
 import {
   clientFor,
   inst,
-  type MethodDef,
   type MethodResult,
   type ModelContext,
-  operationResource,
-  type ResourceSpec,
+  operationSchema,
   writeList,
   writeOperation,
-} from "../_lib/model.ts";
-import { defineMethod } from "../_lib/model.ts";
-import { experimentsFromData } from "../_lib/phenix.ts";
+} from "./_lib/model.ts";
 
 const PREFIX = "experiment";
 
@@ -103,23 +103,14 @@ function createBody(a: z.infer<typeof CreateArgs>): Record<string, unknown> {
   return body;
 }
 
-/** Resource specs owned by this group. */
-export const resources: Record<string, ResourceSpec> = {
-  experiment: {
-    description: "A phenix experiment and its current lifecycle state",
-    schema: ExperimentSchema,
-    lifetime: "infinite",
-    garbageCollection: 10,
-  },
-  operation: operationResource,
-};
-
-/** Methods contributed by this group. */
-export const methods: Record<string, MethodDef> = {
-  experiment_list: defineMethod({
+const methods = {
+  experiment_list: {
     description: "List all experiments, storing each one",
     arguments: z.object({}),
-    execute: async (_args, context): Promise<MethodResult> => {
+    execute: async (
+      _args: Record<string, never>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get("/api/v1/experiments");
       const handles = await writeList(
@@ -130,68 +121,86 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: handles };
     },
-  }),
+  },
 
-  experiment_get: defineMethod({
+  experiment_get: {
     description: "Fetch a single experiment by name and store its state",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       return storeExperiment(client, context, args.name);
     },
-  }),
+  },
 
-  experiment_create: defineMethod({
+  experiment_create: {
     description:
       "Create an experiment from a topology (and optional scenario). " +
       "Does not start it.",
     arguments: CreateArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof CreateArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.post("/api/v1/experiments", createBody(args));
       // Create replies 204 (state via websocket); re-read to capture it.
       return storeExperiment(client, context, args.name);
     },
-  }),
+  },
 
-  experiment_delete: defineMethod({
+  experiment_delete: {
     description: "Delete an experiment (must be stopped)",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.del(`/api/v1/experiments/${encodeURIComponent(args.name)}`);
       return { dataHandles: [] };
     },
-  }),
+  },
 
-  experiment_start: defineMethod({
+  experiment_start: {
     description: "Start (launch) an experiment, then store its updated state",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.post(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/start`,
       );
       return storeExperiment(client, context, args.name);
     },
-  }),
+  },
 
-  experiment_stop: defineMethod({
+  experiment_stop: {
     description: "Stop (tear down) a running experiment, then store its state",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.post(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/stop`,
       );
       return storeExperiment(client, context, args.name);
     },
-  }),
+  },
 
-  experiment_apps: defineMethod({
+  experiment_apps: {
     description: "List the apps configured for an experiment",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/apps`,
@@ -201,12 +210,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  experiment_schedule_get: defineMethod({
+  experiment_schedule_get: {
     description: "Read the current VM-placement schedule for an experiment",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/schedule`,
@@ -216,12 +228,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  experiment_schedule_set: defineMethod({
+  experiment_schedule_set: {
     description: "Apply a scheduling algorithm to place an experiment's VMs",
     arguments: ScheduleArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof ScheduleArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/schedule`,
@@ -233,12 +248,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  experiment_topology: defineMethod({
+  experiment_topology: {
     description: "Fetch the (expanded) topology of an experiment",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/topology`,
@@ -248,12 +266,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  experiment_files: defineMethod({
+  experiment_files: {
     description: "List the files associated with an experiment",
     arguments: NameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof NameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/files`,
@@ -263,12 +284,15 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
 
-  experiment_trigger: defineMethod({
+  experiment_trigger: {
     description: "Trigger (re-run) running-stage apps for an experiment",
     arguments: TriggerArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof TriggerArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(
         `/api/v1/experiments/${encodeURIComponent(args.name)}/trigger`,
@@ -280,5 +304,28 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
+};
+
+/** The `@nblair2/phenix/experiment` model. */
+export const model = {
+  type: "@nblair2/phenix/experiment",
+  version: "2026.05.30.2",
+  globalArguments: GlobalArgsSchema,
+  resources: {
+    experiment: {
+      description: "A phenix experiment and its current lifecycle state",
+      schema: ExperimentSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    operation: {
+      description:
+        "Outcome of a one-shot phenix action (schedule, trigger, apps, etc.)",
+      schema: operationSchema,
+      lifetime: "7d",
+      garbageCollection: 10,
+    },
+  },
+  methods,
 };
