@@ -119,23 +119,19 @@ export async function writeOne(
 }
 
 /**
- * Shared resource spec recording the outcome of an action that has no resource
- * of its own (start/stop a capture, set a schedule, trigger apps, etc.). Groups
- * that use it spread it into the model's `resources`.
+ * Schema for the shared `operation` resource — the outcome of a one-shot action
+ * that has no resource of its own (start/stop a capture, set a schedule, trigger
+ * apps, mint a token, read version/features, etc.). Each model declares an
+ * inline `operation` resource spec (so the registry can display it) that
+ * references this schema.
  */
-export const operationResource: ResourceSpec = {
-  description:
-    "Outcome of a one-shot phenix action (trigger, schedule, capture, commit, etc.)",
-  schema: z.object({
-    operation: z.string(),
-    target: z.string().optional(),
-    message: z.string().optional(),
-    result: z.unknown().optional(),
-    ranAt: z.string(),
-  }).passthrough(),
-  lifetime: "7d",
-  garbageCollection: 10,
-};
+export const operationSchema = z.object({
+  operation: z.string(),
+  target: z.string().optional(),
+  message: z.string().optional(),
+  result: z.unknown().optional(),
+  ranAt: z.string(),
+}).passthrough();
 
 /** Record the outcome of a one-shot action as an `operation` resource. */
 export async function writeOperation(

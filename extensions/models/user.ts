@@ -1,28 +1,28 @@
 /**
- * Identity management for the `@nblair2/phenix` model: UI users, RBAC roles,
- * and long-lived API tokens. Users are stored keyed by username; created
+ * The `@nblair2/phenix/user` model: identity management — phenix UI users, RBAC
+ * roles, and long-lived API tokens. Users are stored keyed by username; created
  * tokens and the role catalog are recorded as one-shot operation results.
+ * Connection details are configured once via the model's global arguments; the
+ * HTTP client and shared plumbing live in `./_lib/`.
  *
  * @module
  */
 import { z } from "npm:zod@4.3.6";
 import {
   asObject,
+  GlobalArgsSchema,
   rolesFromData,
   UserSchema,
   usersFromData,
-} from "../_lib/phenix.ts";
+} from "./_lib/phenix.ts";
 import {
   clientFor,
-  defineMethod,
   inst,
-  type MethodDef,
   type MethodResult,
   type ModelContext,
-  operationResource,
-  type ResourceSpec,
+  operationSchema,
   writeOperation,
-} from "../_lib/model.ts";
+} from "./_lib/model.ts";
 
 const PREFIX = "user";
 
@@ -60,23 +60,14 @@ const TokenArgs = z.object({
   desc: z.string().optional().describe("Description for the token"),
 });
 
-/** Resource specs owned by this group. */
-export const resources: Record<string, ResourceSpec> = {
-  user: {
-    description: "A phenix UI user and its RBAC role",
-    schema: UserSchema,
-    lifetime: "infinite",
-    garbageCollection: 20,
-  },
-  operation: operationResource,
-};
-
-/** Methods contributed by this group. */
-export const methods: Record<string, MethodDef> = {
-  user_list: defineMethod({
+const methods = {
+  user_list: {
     description: "List all phenix users, storing each one",
     arguments: z.object({}),
-    execute: async (_args, context): Promise<MethodResult> => {
+    execute: async (
+      _args: Record<string, never>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get("/api/v1/users");
       const handles = [];
@@ -85,12 +76,15 @@ export const methods: Record<string, MethodDef> = {
       }
       return { dataHandles: handles };
     },
-  }),
+  },
 
-  user_get: defineMethod({
+  user_get: {
     description: "Fetch a single user by username and store it",
     arguments: UsernameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof UsernameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/users/${encodeURIComponent(args.username)}`,
@@ -98,12 +92,15 @@ export const methods: Record<string, MethodDef> = {
       const handle = await writeUser(context, asObject(res.body));
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  user_create: defineMethod({
+  user_create: {
     description: "Create a phenix user with an RBAC role",
     arguments: CreateUserArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof CreateUserArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const body: Record<string, unknown> = {
         username: args.username,
@@ -125,36 +122,45 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  user_delete: defineMethod({
+  user_delete: {
     description: "Delete a phenix user",
     arguments: UsernameArg,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof UsernameArg>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.del(`/api/v1/users/${encodeURIComponent(args.username)}`);
       return { dataHandles: [] };
     },
-  }),
+  },
 
-  role_list: defineMethod({
+  role_list: {
     description: "List the available RBAC roles",
     arguments: z.object({}),
-    execute: async (_args, context): Promise<MethodResult> => {
+    execute: async (
+      _args: Record<string, never>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get("/api/v1/roles");
       return writeOperation(context, "role_list", {
         result: rolesFromData(res.body),
       });
     },
-  }),
+  },
 
-  token_create: defineMethod({
+  token_create: {
     description:
       "Mint a long-lived API token for a user (the result includes the " +
       "secret token value — handle it carefully)",
     arguments: TokenArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof TokenArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.post(
         `/api/v1/users/${encodeURIComponent(args.username)}/tokens`,
@@ -165,5 +171,28 @@ export const methods: Record<string, MethodDef> = {
         result: res.body,
       });
     },
-  }),
+  },
+};
+
+/** The `@nblair2/phenix/user` model. */
+export const model = {
+  type: "@nblair2/phenix/user",
+  version: "2026.05.30.2",
+  globalArguments: GlobalArgsSchema,
+  resources: {
+    user: {
+      description: "A phenix UI user and its RBAC role",
+      schema: UserSchema,
+      lifetime: "infinite",
+      garbageCollection: 20,
+    },
+    operation: {
+      description:
+        "Outcome of a one-shot phenix action (role list, token mint, etc.)",
+      schema: operationSchema,
+      lifetime: "7d",
+      garbageCollection: 10,
+    },
+  },
+  methods,
 };

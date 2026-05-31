@@ -1,10 +1,12 @@
 /**
- * Config CRUD for the `@nblair2/phenix` model. phenix stores all of its
- * declarative objects — Topology, Scenario, Experiment, Image, User — as
- * Kubernetes-style configs (`{apiVersion, kind, metadata, spec}`) under
- * `/api/v1/configs`. These methods list / get / create / update / delete any of
- * them. Create and update accept either an inline object or a path to a local
- * YAML/JSON document.
+ * The `@nblair2/phenix/config` model: CRUD over phenix config objects. phenix
+ * stores all of its declarative objects — Topology, Scenario, Experiment, Image,
+ * User — as Kubernetes-style configs (`{apiVersion, kind, metadata, spec}`)
+ * under `/api/v1/configs`. These methods list / get / create / update / delete
+ * any of them. Create and update accept either an inline object or a path to a
+ * local YAML/JSON document. Connection details are configured once via the
+ * model's global arguments; the HTTP client and shared plumbing live in
+ * `./_lib/`.
  *
  * @module
  */
@@ -13,15 +15,14 @@ import {
   asObject,
   ConfigSchema,
   configsFromData,
+  GlobalArgsSchema,
   type ReadFileLike,
-} from "../_lib/phenix.ts";
+} from "./_lib/phenix.ts";
 import {
   clientFor,
-  defineMethod,
-  type MethodDef,
   type MethodResult,
-  type ResourceSpec,
-} from "../_lib/model.ts";
+  type ModelContext,
+} from "./_lib/model.ts";
 
 const PREFIX = "config";
 
@@ -76,7 +77,11 @@ const UpsertArgs = z.object({
   message: "provide exactly one of config or file",
 });
 
-const UpdateArgs = KindNameArgs.extend({
+const UpdateArgs = z.object({
+  kind: z.string().min(1).describe(
+    "Config kind: Topology, Scenario, Experiment, Image, or User",
+  ),
+  name: z.string().min(1).describe("Config name (metadata.name)"),
   config: z.record(z.string(), z.unknown()).optional().describe(
     "Inline replacement config object; mutually exclusive with file",
   ),
@@ -87,23 +92,14 @@ const UpdateArgs = KindNameArgs.extend({
   message: "provide exactly one of config or file",
 });
 
-/** Resource specs owned by this group. */
-export const resources: Record<string, ResourceSpec> = {
-  config: {
-    description:
-      "A phenix config object (Topology, Scenario, Experiment, Image or User)",
-    schema: ConfigSchema,
-    lifetime: "infinite",
-    garbageCollection: 20,
-  },
-};
-
-/** Methods contributed by this group. */
-export const methods: Record<string, MethodDef> = {
-  config_list: defineMethod({
+const methods = {
+  config_list: {
     description: "List all phenix configs, storing each one",
     arguments: z.object({}),
-    execute: async (_args, context): Promise<MethodResult> => {
+    execute: async (
+      _args: Record<string, never>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get("/api/v1/configs");
       const handles = [];
@@ -114,12 +110,15 @@ export const methods: Record<string, MethodDef> = {
       }
       return { dataHandles: handles };
     },
-  }),
+  },
 
-  config_get: defineMethod({
+  config_get: {
     description: "Fetch a single config by kind and name and store it",
     arguments: KindNameArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof KindNameArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const res = await client.get(
         `/api/v1/configs/${encodeURIComponent(args.kind)}/${
@@ -134,13 +133,16 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  config_create: defineMethod({
+  config_create: {
     description:
       "Create a config from an inline object or a local YAML/JSON file",
     arguments: UpsertArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof UpsertArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       let created: Record<string, unknown>;
       if (args.file) {
@@ -163,13 +165,16 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  config_update: defineMethod({
+  config_update: {
     description:
       "Replace an existing config (by kind/name) from an inline object or file",
     arguments: UpdateArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof UpdateArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       const path = `/api/v1/configs/${encodeURIComponent(args.kind)}/${
         encodeURIComponent(args.name)
@@ -193,12 +198,15 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: [handle] };
     },
-  }),
+  },
 
-  config_delete: defineMethod({
+  config_delete: {
     description: "Delete a config by kind and name",
     arguments: KindNameArgs,
-    execute: async (args, context): Promise<MethodResult> => {
+    execute: async (
+      args: z.infer<typeof KindNameArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
       const client = await clientFor(context);
       await client.del(
         `/api/v1/configs/${encodeURIComponent(args.kind)}/${
@@ -207,5 +215,22 @@ export const methods: Record<string, MethodDef> = {
       );
       return { dataHandles: [] };
     },
-  }),
+  },
+};
+
+/** The `@nblair2/phenix/config` model. */
+export const model = {
+  type: "@nblair2/phenix/config",
+  version: "2026.05.30.2",
+  globalArguments: GlobalArgsSchema,
+  resources: {
+    config: {
+      description:
+        "A phenix config object (Topology, Scenario, Experiment, Image or User)",
+      schema: ConfigSchema,
+      lifetime: "infinite",
+      garbageCollection: 20,
+    },
+  },
+  methods,
 };
