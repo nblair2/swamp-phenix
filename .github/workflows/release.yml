@@ -1,0 +1,89 @@
+name: Release to swamp registry
+
+# Publishes the extension to the swamp registry whenever the version in
+# manifest.yaml is newer than what's already published — typically right after a
+# version-bump PR merges to main. Publishing is idempotent: a merge that did not
+# bump the version is a no-op. After a successful publish, a `v<version>` tag and
+# a GitHub Release are created automatically (derived from the manifest, so they
+# can never drift from what was published).
+#
+# To cut a release: `deno task bump` (writes manifest.yaml + phenix.ts), commit,
+# open a PR, and merge. That's it — no manual tagging.
+#
+# Required repository secret:
+#   SWAMP_API_KEY — a personal API key from your swamp.club account settings.
+#                   The swamp CLI reads it for headless (non-interactive) auth.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install swamp
+        run: curl -fsSL https://swamp.club/install.sh | sh
+
+      - name: Add swamp to PATH
+        run: echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Determine whether to publish
+        id: decide
+        run: |
+          version="$(sed -nE 's/^version:[[:space:]]*"([^"]+)".*/\1/p' manifest.yaml)"
+          if [ -z "$version" ]; then
+            echo "could not read version from manifest.yaml" >&2
+            exit 1
+          fi
+          raw="$(swamp extension version --manifest manifest.yaml --json)" || true
+          if echo "$raw" | jq -e 'has("error")' >/dev/null 2>&1; then
+            echo "could not query the registry: $(echo "$raw" | jq -r '.error')" >&2
+            exit 1
+          fi
+          current="$(echo "$raw" | jq -r '.currentPublished // empty')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$version" = "$current" ]; then
+            echo "v$version is already published — nothing to do."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing v$version (currently published: ${current:-none})."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify authentication
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}
+        run: swamp auth whoami --json
+
+      - name: Push extension to registry
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}
+        run: swamp extension push manifest.yaml --yes --json
+
+      - name: Tag and create a GitHub Release
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists — skipping tag/release."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          gh release create "$tag" --title "$tag" --generate-notes

@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@nblair2/phenix"
+version: "2026.05.30.1"
+description: >
+  Full sceptre-phenix control via the HTTP API: config CRUD
+  (Topology/Scenario/Experiment/Image/User), the experiment lifecycle
+  (create/start/stop/delete, schedule, apps, topology, files, trigger),
+  per-experiment VM control (inventory, reconfigure, power, snapshots, captures,
+  commit), and cluster/server reads (hosts, disks, apps, topologies, version,
+  features, settings) plus identity (users, roles, long-lived tokens).
+repository: "https://github.com/nblair2/swamp-phenix"
+labels:
+  - phenix
+  - sceptre
+  - sandia
+  - minimega
+  - network-emulation
+  - cyber-range
+  - experiment
+  - topology
+  - scenario
+  - vm
+  - infrastructure
+models:
+  - phenix.ts
+additionalFiles:
+  - LICENSE.txt
+  - README.md
+platforms: []

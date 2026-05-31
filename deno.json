@@ -1,0 +1,19 @@
+{
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  },
+  "imports": {
+    "zod": "npm:zod@4.3.6"
+  },
+  "tasks": {
+    "check": "deno check extensions/**/*.ts scripts/*.ts",
+    "fmt": "deno fmt extensions/ scripts/",
+    "fmt:check": "deno fmt --check extensions/ scripts/",
+    "lint": "deno lint extensions/ scripts/",
+    "test": "deno test extensions/",
+    "bump": "deno run --allow-read --allow-write --allow-run=swamp scripts/version.ts bump",
+    "version:check": "deno run --allow-read scripts/version.ts check"
+  }
+}
