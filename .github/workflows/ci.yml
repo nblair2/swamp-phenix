@@ -28,5 +28,28 @@ jobs:
       - name: Type check
         run: deno check extensions/**/*.ts scripts/*.ts
 
+      # The unit tests double as the swamp-schema guard: assertModel calls
+      # `.partial()` on each model's globalArguments (which swamp does at
+      # method-execution time), so a `.refine()`d global-args schema — which no
+      # static check catches — fails here.
       - name: Test
         run: deno test extensions/
+
+      # swamp-level validation. `extension fmt --check` runs swamp's own
+      # formatter/linter; `push --dry-run` packages the extension and validates
+      # the manifest and models without uploading (no auth/network). These catch
+      # manifest/packaging problems that the Deno steps above do not.
+      - name: Install swamp
+        run: curl -fsSL https://swamp.club/install.sh | sh
+
+      - name: Add swamp to PATH
+        run: echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: swamp fmt check
+        run: swamp extension fmt manifest.yaml --check
+
+      - name: swamp dry-run package validation
+        run: swamp extension push manifest.yaml --dry-run --yes
+
+      - name: swamp quality score (informational)
+        run: swamp extension quality manifest.yaml

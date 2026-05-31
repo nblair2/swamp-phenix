@@ -51,10 +51,12 @@ export const GlobalArgsSchema = z.object({
     "PEM-encoded CA certificate to trust when the phenix server uses a " +
       "self-signed or private-CA certificate",
   ),
-}).refine(
-  (a) => !!a.token || (!!a.username && !!a.password),
-  { message: "provide either a token, or both username and password" },
-);
+});
+// NOTE: the "token, or username+password" rule is enforced at runtime in
+// `connect()` rather than with a Zod `.refine()` here. swamp calls `.partial()`
+// on a model's `globalArguments` at method-execution time, which throws on a
+// refined object ("`.partial()` cannot be used on object schemas containing
+// refinements") — so the global-args schema must stay a plain ZodObject.
 
 /** Validated connection/credential arguments. */
 export type PhenixGlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -256,6 +258,12 @@ export async function connect(
   cfg: PhenixGlobalArgs,
   deps: PhenixDeps = {},
 ): Promise<PhenixClient> {
+  if (!cfg.token && !(cfg.username && cfg.password)) {
+    throw new PhenixApiError(
+      "provide either a token, or both username and password",
+      0,
+    );
+  }
   const fetchFn: FetchLike = deps.fetch ?? (globalThis.fetch as FetchLike);
   const root = baseUrl(cfg);
   const clientInit = caClientInit(cfg, deps);

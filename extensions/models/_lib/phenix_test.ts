@@ -49,22 +49,35 @@ const passCfg: PhenixGlobalArgs = {
   password: "secret",
 };
 
-// --- GlobalArgsSchema validation ---
+// --- credentials: schema accepts shapes; connect() enforces the rule ---
 
-Deno.test("GlobalArgsSchema requires token or username+password", () => {
+Deno.test("connect requires token or username+password", async () => {
+  // GlobalArgsSchema is a plain ZodObject (no .refine(), so swamp can .partial()
+  // it), so it accepts the valid shapes; the cross-field rule lives in connect().
   assert(GlobalArgsSchema.safeParse({ host: "h", token: "t" }).success);
   assert(
     GlobalArgsSchema.safeParse({ host: "h", username: "u", password: "p" })
       .success,
   );
-  assert(
-    !GlobalArgsSchema.safeParse({ host: "h", username: "u" }).success,
-    "username without password should fail",
-  );
-  assert(
-    !GlobalArgsSchema.safeParse({ host: "h" }).success,
-    "no credentials should fail",
-  );
+  // connect() rejects missing credentials before issuing any request.
+  const noFetch: FetchLike = () => {
+    throw new Error("fetch should not be called");
+  };
+  for (const bad of [{ host: "h", username: "u" }, { host: "h" }]) {
+    let threw = false;
+    try {
+      await connect(bad as unknown as PhenixGlobalArgs, { fetch: noFetch });
+    } catch {
+      threw = true;
+    }
+    assert(threw, `connect should reject ${JSON.stringify(bad)}`);
+  }
+});
+
+// --- the global-args schema must stay .partial()-able (no .refine()) ---
+
+Deno.test("GlobalArgsSchema is .partial()-able (swamp calls .partial() on it)", () => {
+  GlobalArgsSchema.partial();
 });
 
 // --- auth: token path skips login ---
