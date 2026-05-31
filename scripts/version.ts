@@ -4,8 +4,8 @@
  *
  * The published version lives in several places that must agree: the `version`
  * in `manifest.yaml` (what the registry publishes) and the `version` literal in
- * each of the five model files under `extensions/models/` (`config.ts`,
- * `experiment.ts`, `vm.ts`, `cluster.ts`, `user.ts`). The registry parses each
+ * each of the six model files under `extensions/models/` (`config.ts`,
+ * `experiment.ts`, `scorch.ts`, `vm.ts`, `cluster.ts`, `user.ts`). The registry parses each
  * model's `version` from its source as a string literal, so it cannot be a
  * shared constant — every model carries its own copy. This script keeps them
  * all in lock-step. It is kept outside `extensions/` so it never becomes part
@@ -27,6 +27,7 @@ const MODELS_DIR = `${ROOT}/extensions/models`;
 const MODEL_FILES = [
   "config.ts",
   "experiment.ts",
+  "scorch.ts",
   "vm.ts",
   "cluster.ts",
   "user.ts",

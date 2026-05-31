@@ -1,9 +1,10 @@
 /**
  * The `@nblair2/phenix/user` model: identity management — phenix UI users, RBAC
- * roles, and long-lived API tokens. Users are stored keyed by username; created
- * tokens and the role catalog are recorded as one-shot operation results.
- * Connection details are configured once via the model's global arguments; the
- * HTTP client and shared plumbing live in `./_lib/`.
+ * roles, and long-lived API tokens. Users are stored keyed by username; a minted
+ * token is stored in its own `token` resource whose secret value is vaulted; the
+ * role catalog is recorded as a one-shot operation result. Connection details
+ * are configured once via the model's global arguments; the HTTP client and
+ * shared plumbing live in `./_lib/`.
  *
  * @module
  */
@@ -59,6 +60,18 @@ const TokenArgs = z.object({
   ),
   desc: z.string().optional().describe("Description for the token"),
 });
+
+/**
+ * A minted API token. The secret `token` value is marked sensitive, so on write
+ * swamp stores it in the token vault and persists a `vault.get(...)` reference
+ * in its place rather than the plaintext JWT.
+ */
+const TokenResultSchema = z.object({
+  username: z.string(),
+  token: z.string().meta({ sensitive: true }),
+  desc: z.string().optional(),
+  exp: z.string().optional(),
+}).passthrough();
 
 const methods = {
   user_list: {
@@ -154,8 +167,8 @@ const methods = {
 
   token_create: {
     description:
-      "Mint a long-lived API token for a user (the result includes the " +
-      "secret token value — handle it carefully)",
+      "Mint a long-lived API token for a user; the secret token value is " +
+      "stored in the token vault (a vault reference is persisted, not the JWT)",
     arguments: TokenArgs,
     execute: async (
       args: z.infer<typeof TokenArgs>,
@@ -166,10 +179,18 @@ const methods = {
         `/api/v1/users/${encodeURIComponent(args.username)}/tokens`,
         { lifetime: args.lifetime, desc: args.desc ?? "" },
       );
-      return writeOperation(context, "token_create", {
-        target: args.username,
-        result: res.body,
-      });
+      const body = asObject(res.body);
+      const handle = await context.writeResource(
+        "token",
+        inst("token", args.username),
+        {
+          username: args.username,
+          token: typeof body.token === "string" ? body.token : "",
+          desc: typeof body.desc === "string" ? body.desc : (args.desc ?? ""),
+          ...(typeof body.exp === "string" ? { exp: body.exp } : {}),
+        },
+      );
+      return { dataHandles: [handle] };
     },
   },
 };
@@ -177,7 +198,7 @@ const methods = {
 /** The `@nblair2/phenix/user` model. */
 export const model = {
   type: "@nblair2/phenix/user",
-  version: "2026.05.31.2",
+  version: "2026.05.31.3",
   globalArguments: GlobalArgsSchema,
   resources: {
     user: {
@@ -187,10 +208,17 @@ export const model = {
       garbageCollection: 20,
     },
     operation: {
-      description:
-        "Outcome of a one-shot phenix action (role list, token mint, etc.)",
+      description: "Outcome of a one-shot phenix action (e.g. role list)",
       schema: operationSchema,
       lifetime: "7d",
+      garbageCollection: 10,
+    },
+    token: {
+      description:
+        "A minted phenix API token; the secret value is stored in the vault",
+      schema: TokenResultSchema,
+      vaultName: "phenix-tokens",
+      lifetime: "infinite",
       garbageCollection: 10,
     },
   },
