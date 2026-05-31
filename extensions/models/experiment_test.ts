@@ -96,3 +96,20 @@ Deno.test("experiment_create requires name and topology", () => {
   assert(!args.safeParse({ name: "x" }).success, "topology required");
   assert(!args.safeParse({ topology: "t" }).success, "name required");
 });
+
+Deno.test("experiment_create enforces phenix name rules", () => {
+  const args = model.methods.experiment_create.arguments;
+  const ok = (name: string) => args.safeParse({ name, topology: "t" }).success;
+
+  // Allowed charset: letters, digits, and _ @ . -
+  assert(ok("Exp-1_v2.0@host"), "valid name with allowed specials");
+  assert(ok("a".repeat(15)), "15 chars is allowed");
+
+  // Rejected: too long, bad chars / spaces, empty, and reserved words.
+  assert(!ok("a".repeat(16)), "16 chars exceeds the 15-char cap");
+  assert(!ok("has space"), "spaces are not allowed");
+  assert(!ok("bad/slash"), "path separators are not allowed");
+  assert(!ok(""), "empty name is not allowed");
+  assert(!ok("all"), "'all' is reserved");
+  assert(!ok("Create"), "'create' is reserved (case-insensitive)");
+});

@@ -54,8 +54,29 @@ const NameArg = z.object({
   name: z.string().min(1).describe("Experiment name"),
 });
 
+// Experiment-name rules mirror upstream phenix (sandialabs/sceptre-phenix):
+//   - charset: every config kind (incl. Experiment) is validated server-side
+//     against `^[a-zA-Z0-9_@.-]*$` (api/config/config.go: `NameRegex`).
+//   - length: in "auto bridge mode" the name doubles as the minimega bridge
+//     name and is capped at 15 chars (api/experiment/experiment.go:
+//     `maxNameLength`). The cap is server-config-dependent; we apply it here so
+//     creates fail fast on auto-bridge servers (the common default).
+//   - reserved: the API rejects "all"; the web UI also blocks "create".
+const NAME_RE = /^[a-zA-Z0-9_@.-]+$/;
+const RESERVED_NAMES = new Set(["all", "create"]);
+
 const CreateArgs = z.object({
-  name: z.string().min(1).describe("Unique experiment name"),
+  name: z.string()
+    .min(1)
+    .max(15)
+    .regex(NAME_RE, "name may contain only letters, digits, and _ @ . -")
+    .refine(
+      (n) => !RESERVED_NAMES.has(n.toLowerCase()),
+      "experiment name must not be a reserved word ('all' or 'create')",
+    )
+    .describe(
+      "Unique experiment name (≤15 chars; letters, digits, and _ @ . -)",
+    ),
   topology: z.string().min(1).describe("Name of the Topology config to use"),
   scenario: z.string().optional().describe(
     "Name of the Scenario config to apply (optional)",
