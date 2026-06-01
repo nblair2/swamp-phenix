@@ -10,10 +10,12 @@
  * use the standard `Authorization` header, to avoid clashing with proxy auth).
  *
  * Alternatively, when phenix sits behind an authenticating reverse proxy that
- * establishes identity from a session cookie, set `sessionCookie` (+ optional
- * `sessionCookieName`): the cookie is replayed on every request, no phenix login
- * is performed, and no `X-Phenix-Auth-Token` is sent — the proxy injects the
- * identity and phenix trusts it.
+ * establishes identity from a session cookie (`PHENIX_WEB_AUTH=proxy`), set
+ * `sessionCookie` (+ optional `sessionCookieName`): the cookie is replayed on
+ * every request instead of an `X-Phenix-Auth-Token` bearer. Because phenix only
+ * honors a token it registered via its own login, connect first issues a
+ * `GET /api/v1/login` carrying the cookie (idempotent) so this server registers
+ * it; subsequent calls then succeed instead of failing with "user token error".
  *
  * Unlike some APIs, phenix has no response envelope: single resources are
  * returned as bare objects and lists are wrapped under a kind-specific key
@@ -281,12 +283,44 @@ async function authenticate(
 }
 
 /**
+ * Register a proxy session cookie's token with this phenix server. Under
+ * PHENIX_WEB_AUTH=proxy, the reverse proxy authenticates the cookie and injects
+ * identity, but phenix only accepts a token it minted via its own login — so a
+ * `GET /api/v1/login` carrying the cookie is required once to register it (the
+ * proxy-auth login path calls AddToken). Idempotent. `redirect:"manual"` so a
+ * missing/expired cookie (the proxy answers those with a 302 to its login page)
+ * surfaces as a clear error instead of silently "succeeding" on the login page.
+ */
+async function registerProxySession(
+  fetchFn: FetchLike,
+  root: string,
+  cookieHeaders: Record<string, string>,
+  clientInit: RequestInit,
+): Promise<void> {
+  const res = await fetchFn(`${root}/api/v1/login`, {
+    method: "GET",
+    headers: cookieHeaders,
+    redirect: "manual",
+    ...clientInit,
+  });
+  await res.body?.cancel().catch(() => {});
+  if (res.status !== 200) {
+    const why = res.status === 0
+      ? "redirected to the proxy login page — session cookie missing or expired"
+      : `HTTP ${res.status}`;
+    throw new PhenixApiError(`proxy session registration failed: ${why}`, 401);
+  }
+}
+
+/**
  * Connect to phenix and return an authenticated client.
  *
- * Resolves a bearer token (pre-issued `token`, or a `POST /api/v1/login`
- * handshake) and returns helpers that attach it as `X-Phenix-Auth-Token:
- * Bearer <jwt>` on every call. When `caCert` is set, a dedicated Deno HTTP
- * client is created so a self-signed/private-CA server certificate is trusted.
+ * Auth is one of: a pre-issued `token` or a `POST /api/v1/login` handshake (both
+ * sent as `X-Phenix-Auth-Token: Bearer <jwt>`), or a `sessionCookie` replayed as
+ * `Cookie: <name>=<jwt>` for a server behind an authenticating reverse proxy
+ * (`PHENIX_WEB_AUTH=proxy`) — in which case connect first registers the cookie's
+ * token via a GET to `/api/v1/login`. When `caCert` is set, a dedicated Deno
+ * HTTP client is created so a self-signed/private-CA certificate is trusted.
  */
 export async function connect(
   cfg: PhenixGlobalArgs,
@@ -303,13 +337,19 @@ export async function connect(
   const fetchFn: FetchLike = deps.fetch ?? (globalThis.fetch as FetchLike);
   const root = baseUrl(cfg);
   const clientInit = caClientInit(cfg, deps);
-  // Auth header set once: either a proxy session cookie (no phenix login), or a
-  // phenix bearer token (pre-issued, or minted via POST /api/v1/login).
-  const authHeaders: Record<string, string> = usingCookie
-    ? {
+  // Auth header set once: either a proxy session cookie or a phenix bearer token.
+  let authHeaders: Record<string, string>;
+  if (usingCookie) {
+    authHeaders = {
       "Cookie": `${cfg.sessionCookieName ?? "auth_token"}=${cfg.sessionCookie}`,
-    }
-    : {
+    };
+    // Under PHENIX_WEB_AUTH=proxy the reverse proxy authenticates the cookie and
+    // injects identity, but this phenix server only honors a token it registered
+    // via its OWN login — so register the cookie's token once before any API
+    // call (otherwise they fail with "user token error"). Idempotent.
+    await registerProxySession(fetchFn, root, authHeaders, clientInit);
+  } else {
+    authHeaders = {
       "X-Phenix-Auth-Token": `Bearer ${await authenticate(
         cfg,
         fetchFn,
@@ -317,6 +357,7 @@ export async function connect(
         clientInit,
       )}`,
     };
+  }
 
   async function send(
     method: string,
