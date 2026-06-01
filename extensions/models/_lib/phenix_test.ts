@@ -104,11 +104,15 @@ Deno.test("connect with a token does not call login and sends the bearer header"
 
 // --- auth: session-cookie path skips login and sends a Cookie, not a bearer ---
 
-Deno.test("connect with a sessionCookie sends the cookie and no login/bearer", async () => {
-  const calls: { url: string; headers: Headers }[] = [];
+Deno.test("sessionCookie registers via GET /login, then sends the cookie (no bearer)", async () => {
+  const calls: { url: string; method: string; headers: Headers }[] = [];
   const fetchStub: FetchLike = (input, init) => {
-    calls.push({ url: input, headers: new Headers(init?.headers) });
-    return Promise.resolve(jsonResponse(200, { ok: true }));
+    calls.push({
+      url: input,
+      method: init?.method ?? "GET",
+      headers: new Headers(init?.headers),
+    });
+    return Promise.resolve(jsonResponse(200, { user: {} }));
   };
   const cookieCfg: PhenixGlobalArgs = {
     host: "phenix.test",
@@ -118,18 +122,44 @@ Deno.test("connect with a sessionCookie sends the cookie and no login/bearer", a
     sessionCookieName: "auth_token",
   };
   const client = await connect(cookieCfg, { fetch: fetchStub });
-  assertEquals(
-    calls.length,
-    0,
-    "cookie auth must not hit the network to login",
-  );
-  await client.get("/api/v1/experiments");
-  assertEquals(calls.length, 1);
+  // connect() registers the cookie's token with this server via GET /login.
+  assertEquals(calls.length, 1, "connect performs the /login registration");
+  assertEquals(calls[0].method, "GET");
+  assertEquals(calls[0].url, "https://phenix.test:3000/api/v1/login");
   assertEquals(calls[0].headers.get("Cookie"), "auth_token=JWT123");
+  // Subsequent API calls carry the cookie, never a bearer.
+  await client.get("/api/v1/experiments");
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1].url, "https://phenix.test:3000/api/v1/experiments");
+  assertEquals(calls[1].headers.get("Cookie"), "auth_token=JWT123");
   assertEquals(
-    calls[0].headers.get("X-Phenix-Auth-Token"),
+    calls[1].headers.get("X-Phenix-Auth-Token"),
     null,
     "no phenix bearer is sent when assuming identity through the proxy",
+  );
+});
+
+Deno.test("registration failure surfaces a clear error", async () => {
+  // A missing/expired cookie makes the proxy answer GET /login with a non-200
+  // (live: a redirect to its login page); connect must reject, not proceed.
+  const fetchStub: FetchLike = () =>
+    Promise.resolve(jsonResponse(401, { error: "no" }));
+  const cfg: PhenixGlobalArgs = {
+    host: "phenix.test",
+    port: 3000,
+    scheme: "https",
+    sessionCookie: "STALE",
+  };
+  let thrown: unknown;
+  try {
+    await connect(cfg, { fetch: fetchStub });
+  } catch (e) {
+    thrown = e;
+  }
+  assert(thrown instanceof PhenixApiError, "should throw PhenixApiError");
+  assert(
+    (thrown as PhenixApiError).message.includes("registration failed"),
+    "error names the registration failure",
   );
 });
 
@@ -137,10 +167,10 @@ Deno.test("sessionCookie takes precedence over token and defaults its name", asy
   const calls: { headers: Headers }[] = [];
   const fetchStub: FetchLike = (_input, init) => {
     calls.push({ headers: new Headers(init?.headers) });
-    return Promise.resolve(jsonResponse(200, { ok: true }));
+    return Promise.resolve(jsonResponse(200, { user: {} }));
   };
-  // No sessionCookieName given → schema default 'auth_token'. Token also set →
-  // cookie wins, no bearer.
+  // No sessionCookieName given → defaults to 'auth_token'. Token also set →
+  // cookie wins, no bearer. calls[0] is the /login registration.
   const cfg = GlobalArgsSchema.parse({
     host: "phenix.test",
     sessionCookie: "JWT123",

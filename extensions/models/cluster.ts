@@ -161,7 +161,7 @@ const methods = {
 /** The `@nblair2/phenix/cluster` model. */
 export const model = {
   type: "@nblair2/phenix/cluster",
-  version: "2026.05.31.4",
+  version: "2026.05.31.5",
   globalArguments: GlobalArgsSchema,
   resources: {
     host: {
