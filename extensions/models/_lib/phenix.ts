@@ -9,6 +9,12 @@
  * **`X-Phenix-Auth-Token: Bearer <jwt>`** header (phenix deliberately does NOT
  * use the standard `Authorization` header, to avoid clashing with proxy auth).
  *
+ * Alternatively, when phenix sits behind an authenticating reverse proxy that
+ * establishes identity from a session cookie, set `sessionCookie` (+ optional
+ * `sessionCookieName`): the cookie is replayed on every request, no phenix login
+ * is performed, and no `X-Phenix-Auth-Token` is sent — the proxy injects the
+ * identity and phenix trusts it.
+ *
  * Unlike some APIs, phenix has no response envelope: single resources are
  * returned as bare objects and lists are wrapped under a kind-specific key
  * (e.g. `{experiments: [...]}`, `{vms: [...], total}`, `{configs: [...]}`).
@@ -46,6 +52,16 @@ export const GlobalArgsSchema = z.object({
   ),
   token: z.string().meta({ sensitive: true }).optional().describe(
     "Pre-issued long-lived phenix API token (JWT); when set, login is skipped",
+  ),
+  sessionCookie: z.string().meta({ sensitive: true }).optional().describe(
+    "Session cookie value to send on every request (as " +
+      "`Cookie: <sessionCookieName>=<value>`) instead of logging in. Use when " +
+      "phenix sits behind an authenticating reverse proxy that establishes " +
+      "identity from a session cookie; no phenix login is performed and no " +
+      "X-Phenix-Auth-Token is sent. Takes precedence over token/username.",
+  ),
+  sessionCookieName: z.string().optional().describe(
+    "Cookie name paired with `sessionCookie` (default 'auth_token').",
   ),
   caCert: z.string().meta({ sensitive: true }).optional().describe(
     "PEM-encoded CA certificate to trust when the phenix server uses a " +
@@ -276,16 +292,31 @@ export async function connect(
   cfg: PhenixGlobalArgs,
   deps: PhenixDeps = {},
 ): Promise<PhenixClient> {
-  if (!cfg.token && !(cfg.username && cfg.password)) {
+  const usingCookie = typeof cfg.sessionCookie === "string" &&
+    cfg.sessionCookie.length > 0;
+  if (!usingCookie && !cfg.token && !(cfg.username && cfg.password)) {
     throw new PhenixApiError(
-      "provide either a token, or both username and password",
+      "provide a sessionCookie, a token, or both username and password",
       0,
     );
   }
   const fetchFn: FetchLike = deps.fetch ?? (globalThis.fetch as FetchLike);
   const root = baseUrl(cfg);
   const clientInit = caClientInit(cfg, deps);
-  const token = await authenticate(cfg, fetchFn, root, clientInit);
+  // Auth header set once: either a proxy session cookie (no phenix login), or a
+  // phenix bearer token (pre-issued, or minted via POST /api/v1/login).
+  const authHeaders: Record<string, string> = usingCookie
+    ? {
+      "Cookie": `${cfg.sessionCookieName ?? "auth_token"}=${cfg.sessionCookie}`,
+    }
+    : {
+      "X-Phenix-Auth-Token": `Bearer ${await authenticate(
+        cfg,
+        fetchFn,
+        root,
+        clientInit,
+      )}`,
+    };
 
   async function send(
     method: string,
@@ -297,9 +328,7 @@ export async function connect(
       allowStatuses?: number[];
     },
   ): Promise<ApiResult> {
-    const headers: Record<string, string> = {
-      "X-Phenix-Auth-Token": `Bearer ${token}`,
-    };
+    const headers: Record<string, string> = { ...authHeaders };
     let bodyInit: BodyInit | undefined;
     if (opts.raw !== undefined) {
       headers["Content-Type"] = opts.raw.contentType;

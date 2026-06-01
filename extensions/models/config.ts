@@ -276,7 +276,7 @@ const methods = {
 /** The `@nblair2/phenix/config` model. */
 export const model = {
   type: "@nblair2/phenix/config",
-  version: "2026.05.31.3",
+  version: "2026.05.31.4",
   globalArguments: GlobalArgsSchema,
   resources: {
     config: {

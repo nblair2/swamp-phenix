@@ -331,7 +331,7 @@ const methods = {
 /** The `@nblair2/phenix/experiment` model. */
 export const model = {
   type: "@nblair2/phenix/experiment",
-  version: "2026.05.31.3",
+  version: "2026.05.31.4",
   globalArguments: GlobalArgsSchema,
   resources: {
     experiment: {
