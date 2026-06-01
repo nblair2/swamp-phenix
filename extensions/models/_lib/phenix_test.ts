@@ -102,6 +102,56 @@ Deno.test("connect with a token does not call login and sends the bearer header"
   );
 });
 
+// --- auth: session-cookie path skips login and sends a Cookie, not a bearer ---
+
+Deno.test("connect with a sessionCookie sends the cookie and no login/bearer", async () => {
+  const calls: { url: string; headers: Headers }[] = [];
+  const fetchStub: FetchLike = (input, init) => {
+    calls.push({ url: input, headers: new Headers(init?.headers) });
+    return Promise.resolve(jsonResponse(200, { ok: true }));
+  };
+  const cookieCfg: PhenixGlobalArgs = {
+    host: "phenix.test",
+    port: 3000,
+    scheme: "https",
+    sessionCookie: "JWT123",
+    sessionCookieName: "auth_token",
+  };
+  const client = await connect(cookieCfg, { fetch: fetchStub });
+  assertEquals(
+    calls.length,
+    0,
+    "cookie auth must not hit the network to login",
+  );
+  await client.get("/api/v1/experiments");
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].headers.get("Cookie"), "auth_token=JWT123");
+  assertEquals(
+    calls[0].headers.get("X-Phenix-Auth-Token"),
+    null,
+    "no phenix bearer is sent when assuming identity through the proxy",
+  );
+});
+
+Deno.test("sessionCookie takes precedence over token and defaults its name", async () => {
+  const calls: { headers: Headers }[] = [];
+  const fetchStub: FetchLike = (_input, init) => {
+    calls.push({ headers: new Headers(init?.headers) });
+    return Promise.resolve(jsonResponse(200, { ok: true }));
+  };
+  // No sessionCookieName given → schema default 'auth_token'. Token also set →
+  // cookie wins, no bearer.
+  const cfg = GlobalArgsSchema.parse({
+    host: "phenix.test",
+    sessionCookie: "JWT123",
+    token: "PRE",
+  });
+  const client = await connect(cfg, { fetch: fetchStub });
+  await client.get("/api/v1/experiments");
+  assertEquals(calls[0].headers.get("Cookie"), "auth_token=JWT123");
+  assertEquals(calls[0].headers.get("X-Phenix-Auth-Token"), null);
+});
+
 // --- basePath: reverse-proxy path prefix is prepended (slashes normalized) ---
 
 Deno.test("basePath prefixes every request path and normalizes slashes", async () => {
