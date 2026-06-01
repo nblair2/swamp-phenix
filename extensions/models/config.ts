@@ -35,6 +35,41 @@ function configKey(cfg: Record<string, unknown>): string {
   return `${kind}-${name}`;
 }
 
+/** Parse a `<kind>-<name>` key from a `…/configs/<kind>/<name>` Location URL. */
+function keyFromLocation(loc: string | undefined): string | undefined {
+  if (!loc) return undefined;
+  const m = loc.match(/\/configs\/([^/]+)\/([^/?#]+)\/?$/);
+  if (!m) return undefined;
+  return `${decodeURIComponent(m[1]).toLowerCase()}-${
+    decodeURIComponent(m[2])
+  }`;
+}
+
+/**
+ * Instance suffix (`<kind>-<name>`) for a created/uploaded config document.
+ *
+ * phenix answers a successful create with `201 Created` + an EMPTY body +
+ * `Location: /api/v1/configs/<kind>/<name>`, so the canonical identity lives in
+ * the Location header — prefer it (it's authoritative, unique, and matches what
+ * `config_list`/`config_get` store; the local file name often differs from the
+ * config's `metadata.name`). Fall back to an echoed full body, then to the
+ * file's stem — without a fallback an empty body makes every file in a
+ * directory collide on `config-unknown` ("Duplicate data instance name").
+ */
+function uploadKey(
+  location: string | undefined,
+  created: Record<string, unknown>,
+  file: string,
+): string {
+  const fromLocation = keyFromLocation(location);
+  if (fromLocation) return fromLocation;
+  const meta = asObject(created.metadata);
+  if (typeof created.kind === "string" && typeof meta.name === "string") {
+    return configKey(created);
+  }
+  return (file.split(/[/\\]/).pop() ?? file).replace(/\.(ya?ml|json)$/i, "");
+}
+
 /** Sanitize a path-ish instance key (mirrors model.inst, applied to our key). */
 function instKey(key: string): string {
   return `${PREFIX}-${key.replace(/\.\./g, "").replace(/[/\\]/g, "_")}`;
@@ -161,23 +196,29 @@ const methods = {
     ): Promise<MethodResult> => {
       const client = await clientFor(context);
       let created: Record<string, unknown>;
+      let location: string | undefined;
       if (args.file) {
         const readFile = context._deps?.readFile ?? Deno.readFile;
         const { text, contentType } = await readConfigFile(args.file, readFile);
         const res = await client.postRaw("/api/v1/configs", text, contentType);
         created = asObject(res.body);
+        location = res.location;
       } else {
         const res = await client.post("/api/v1/configs", args.config!);
         created = asObject(res.body);
+        location = res.location;
       }
-      // 201 returns the stored config; if the body was empty fall back to input.
+      // 201 returns an empty body + Location; if the body was empty AND we have
+      // an inline config, keep it as the stored data.
       if (Object.keys(created).length === 0 && args.config) {
         created = args.config;
       }
       const handle = await context.writeResource(
         "config",
-        instKey(configKey(created)),
-        created,
+        // Identity from the Location header (canonical), else the echoed/inline
+        // body's kind+name, else the file stem — never a bare `config-unknown`.
+        instKey(uploadKey(location, created, args.file ?? "")),
+        Object.keys(created).length > 0 ? created : { file: args.file },
       );
       return { dataHandles: [handle] };
     },
@@ -213,7 +254,7 @@ const methods = {
         handles.push(
           await context.writeResource(
             "config",
-            instKey(configKey(created)),
+            instKey(uploadKey(res.location, created, file)),
             Object.keys(created).length > 0 ? created : { file },
           ),
         );
@@ -276,7 +317,7 @@ const methods = {
 /** The `@nblair2/phenix/config` model. */
 export const model = {
   type: "@nblair2/phenix/config",
-  version: "2026.05.31.5",
+  version: "2026.05.31.6",
   globalArguments: GlobalArgsSchema,
   resources: {
     config: {

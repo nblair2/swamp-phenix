@@ -91,6 +91,13 @@ export interface ApiResult {
   status: number;
   /** The parsed JSON response body (object, array, or null for empty/204). */
   body: unknown;
+  /**
+   * The `Location` response header, when present. phenix answers a successful
+   * create with `201 Created` + an empty body + `Location: /api/v1/configs/
+   * <kind>/<name>` (and likewise for other created entities), so this carries
+   * the canonical identity of the created resource when the body does not.
+   */
+  location?: string;
 }
 
 /** Error thrown when phenix returns a non-OK HTTP status. */
@@ -388,7 +395,11 @@ export async function connect(
     if (!res.ok && !(opts.allowStatuses ?? []).includes(res.status)) {
       throw new PhenixApiError(errorMessage(body, res.status), res.status);
     }
-    return { status: res.status, body };
+    return {
+      status: res.status,
+      body,
+      location: res.headers.get("location") ?? undefined,
+    };
   }
 
   return {

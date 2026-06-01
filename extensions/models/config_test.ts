@@ -9,6 +9,7 @@ import {
   assert,
   assertEquals,
   assertModel,
+  createdResponse,
   harness,
   jsonResponse,
 } from "./_lib/testing.ts";
@@ -79,6 +80,64 @@ Deno.test("config_upload_dir POSTs every yaml/json file in the directory", async
   assert(posted[1].includes("name: base"), "topology-base.yml uploaded");
   assertEquals(result.dataHandles.length, 2);
   assertEquals(written.length, 2);
+  // Fallback path: empty body AND no Location header — the instance name must
+  // come from the (unique) file stem, NOT a shared `config-config-unknown` that
+  // collides ("Duplicate data instance name").
+  assertEquals(written[0].instanceName, "config-scenarioA");
+  assertEquals(written[1].instanceName, "config-topology-base");
+});
+
+Deno.test("config_upload_dir names instances from the Location header (canonical)", async () => {
+  // The real phenix create reply: 201, empty body, Location /configs/<kind>/<name>.
+  // Note the config's metadata.name differs from the file name (e.g. the file
+  // topology-base.yml holds a Topology named control-A-base) — so the Location
+  // is the only correct, collision-free identity.
+  const readDir: ReadDirLike = (_p) =>
+    Promise.resolve(["topology-base.yml", "scenarioA.yml"]);
+  const readFile: ReadFileLike = (_p) =>
+    Promise.resolve(new TextEncoder().encode("kind: Topology\n"));
+  // Files upload sorted: scenarioA.yml first, then topology-base.yml.
+  const locations = [
+    "/api/v1/configs/scenario/control-A-A",
+    "/api/v1/configs/topology/control-A-base",
+  ];
+  let p = 0;
+  const { context, written } = harness(
+    (c) =>
+      c.method === "POST"
+        ? createdResponse(locations[p++])
+        : jsonResponse(200, {}),
+    readFile,
+    readDir,
+  );
+  await model.methods.config_upload_dir.execute({ dir: "/r" }, context);
+  // phenix's `<kind>-<name>` identity (lowercased kind), matching config_list.
+  assertEquals(written[0].instanceName, "config-scenario-control-A-A");
+  assertEquals(written[1].instanceName, "config-topology-control-A-base");
+});
+
+Deno.test("config_upload_dir names from the echoed kind/name when phenix returns a full body", async () => {
+  const readDir: ReadDirLike = (_p) => Promise.resolve(["a.yml", "b.yml"]);
+  const readFile: ReadFileLike = (_p) =>
+    Promise.resolve(new TextEncoder().encode("kind: Topology\n"));
+  const bodies = [
+    { kind: "Topology", metadata: { name: "alpha" } },
+    { kind: "Scenario", metadata: { name: "beta" } },
+  ];
+  let i = 0;
+  const { context, written } = harness(
+    (
+      c,
+    ) => (c.method === "POST"
+      ? jsonResponse(201, bodies[i++])
+      : jsonResponse(200, {})),
+    readFile,
+    readDir,
+  );
+  await model.methods.config_upload_dir.execute({ dir: "/r" }, context);
+  // When phenix echoes the stored config, keep its `<kind>-<name>` identity.
+  assertEquals(written[0].instanceName, "config-topology-alpha");
+  assertEquals(written[1].instanceName, "config-scenario-beta");
 });
 
 Deno.test("config_create rejects supplying both config and file", () => {

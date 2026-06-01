@@ -198,7 +198,7 @@ const methods = {
 /** The `@nblair2/phenix/user` model. */
 export const model = {
   type: "@nblair2/phenix/user",
-  version: "2026.05.31.5",
+  version: "2026.05.31.6",
   globalArguments: GlobalArgsSchema,
   resources: {
     user: {
