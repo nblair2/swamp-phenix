@@ -113,6 +113,14 @@ export function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/**
+ * Build phenix's create response: `201 Created`, an empty body, and a
+ * `Location: /api/v1/configs/<kind>/<name>` header (its canonical create reply).
+ */
+export function createdResponse(location: string, status = 201): Response {
+  return new Response(null, { status, headers: { location } });
+}
+
 /** A `writeResource` call recorded by the harness. */
 export interface Written {
   specName: string;
