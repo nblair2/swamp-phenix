@@ -410,7 +410,7 @@ const methods = {
 /** The `@nblair2/phenix/vm` model. */
 export const model = {
   type: "@nblair2/phenix/vm",
-  version: "2026.05.31.6",
+  version: "2026.05.31.7",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {

@@ -13,6 +13,7 @@ import {
   harness,
   jsonResponse,
 } from "./_lib/testing.ts";
+import { PhenixApiError } from "./_lib/phenix.ts";
 import type { ReadDirLike, ReadFileLike } from "./_lib/phenix.ts";
 
 Deno.test("config model identity and shape", () => {
@@ -26,6 +27,7 @@ Deno.test("config model identity and shape", () => {
       "config_upload_dir",
       "config_update",
       "config_delete",
+      "config_prune",
     ],
     ["config"],
   );
@@ -80,11 +82,94 @@ Deno.test("config_upload_dir POSTs every yaml/json file in the directory", async
   assert(posted[1].includes("name: base"), "topology-base.yml uploaded");
   assertEquals(result.dataHandles.length, 2);
   assertEquals(written.length, 2);
-  // Fallback path: empty body AND no Location header — the instance name must
-  // come from the (unique) file stem, NOT a shared `config-config-unknown` that
-  // collides ("Duplicate data instance name").
-  assertEquals(written[0].instanceName, "config-scenarioA");
+  // Named from the document's own parsed kind+metadata.name (authoritative,
+  // matching config_list) — note metadata.name ("scnA") differs from the file.
+  assertEquals(written[0].instanceName, "config-scenario-scnA");
   assertEquals(written[1].instanceName, "config-topology-base");
+});
+
+Deno.test("config_upload_dir upserts: a POST 'already exists' falls back to a named PUT", async () => {
+  const readDir: ReadDirLike = (_p) => Promise.resolve(["topo.yml"]);
+  const readFile: ReadFileLike = (_p) =>
+    Promise.resolve(
+      new TextEncoder().encode(
+        "kind: Topology\nmetadata:\n  name: control-A-base\n",
+      ),
+    );
+  // phenix POST is create-only: a re-run gets 400 "already exists".
+  const { context, calls, written } = harness(
+    (c) =>
+      c.method === "POST"
+        ? jsonResponse(400, {
+          cause: "storing config: config already exists",
+          message: "config with same name already exists",
+        })
+        : jsonResponse(204, null), // the PUT update
+    readFile,
+    readDir,
+  );
+  const result = await model.methods.config_upload_dir.execute(
+    { dir: "/r" },
+    context,
+  );
+  assertEquals(
+    calls.map((c) => `${c.method} ${c.path}`),
+    [
+      "POST /api/v1/configs",
+      "PUT /api/v1/configs/Topology/control-A-base",
+    ],
+  );
+  assertEquals(written[0].instanceName, "config-topology-control-A-base");
+  assertEquals(result.dataHandles.length, 1);
+});
+
+Deno.test("config_upload_dir surfaces a genuine validation 400 (does not PUT)", async () => {
+  const readDir: ReadDirLike = (_p) => Promise.resolve(["bad.yml"]);
+  const readFile: ReadFileLike = (_p) =>
+    Promise.resolve(
+      new TextEncoder().encode("kind: Topology\nmetadata:\n  name: x\n"),
+    );
+  const { context, calls } = harness(
+    (c) =>
+      c.method === "POST"
+        ? jsonResponse(400, { message: "invalid topology: missing nodes" })
+        : jsonResponse(204, null),
+    readFile,
+    readDir,
+  );
+  let thrown: unknown;
+  try {
+    await model.methods.config_upload_dir.execute({ dir: "/r" }, context);
+  } catch (e) {
+    thrown = e;
+  }
+  assert(thrown instanceof PhenixApiError, "a non-'exists' 400 must surface");
+  assertEquals(calls.filter((c) => c.method === "PUT").length, 0);
+});
+
+Deno.test("config_upload_dir reads metadata.name past annotations (real scorch shape)", async () => {
+  // The dependency-free identity parser must take the metadata-block `name`,
+  // not a nested key under `annotations`/`spec`.
+  const doc = "apiVersion: phenix.sandia.gov/v2\nkind: Scenario\n" +
+    "metadata:\n  name: control-A-scorch\n  annotations:\n" +
+    "    topology: control-A-A\nspec:\n  apps: []\n";
+  const readDir: ReadDirLike = (_p) => Promise.resolve(["s.yml"]);
+  const readFile: ReadFileLike = (_p) =>
+    Promise.resolve(new TextEncoder().encode(doc));
+  const { context, calls, written } = harness(
+    (c) =>
+      c.method === "POST"
+        ? jsonResponse(400, { message: "config already exists" })
+        : jsonResponse(204, null),
+    readFile,
+    readDir,
+  );
+  await model.methods.config_upload_dir.execute({ dir: "/r" }, context);
+  assertEquals(
+    `${calls[1].method} ${calls[1].path}`,
+    "PUT /api/v1/configs/Scenario/control-A-scorch",
+  );
+  assertEquals(written[0].instanceName, "config-scenario-control-A-scorch");
 });
 
 Deno.test("config_upload_dir names instances from the Location header (canonical)", async () => {
@@ -155,4 +240,62 @@ Deno.test("config_delete issues DELETE to the kind/name path", async () => {
   );
   assertEquals(calls[0].method, "DELETE");
   assertEquals(calls[0].path, "/api/v1/configs/Experiment/demo");
+});
+
+Deno.test("config_prune deletes only configs matching the prefix and kinds", async () => {
+  const configs = {
+    configs: [
+      { kind: "Topology", metadata: { name: "control-A-base" } }, // match
+      { kind: "Scenario", metadata: { name: "control-A-scorch" } }, // match
+      { kind: "Topology", metadata: { name: "control-B-base" } }, // other experiment
+      { kind: "Image", metadata: { name: "control-A-img" } }, // prefix ok, kind excluded
+      { kind: "Topology", metadata: { name: "byterage" } }, // stock, no prefix
+    ],
+  };
+  const { context, calls } = harness((c) =>
+    c.method === "GET" ? jsonResponse(200, configs) : jsonResponse(204, null)
+  );
+  const result = await model.methods.config_prune.execute(
+    { namePrefix: "control-A-", kinds: ["Topology", "Scenario"] },
+    context,
+  );
+  const deletes = calls.filter((c) => c.method === "DELETE").map((c) => c.path);
+  assertEquals(deletes, [
+    "/api/v1/configs/Topology/control-A-base",
+    "/api/v1/configs/Scenario/control-A-scorch",
+  ]);
+  assertEquals(result.dataHandles.length, 0);
+});
+
+Deno.test("config_prune is a no-op when nothing matches", async () => {
+  const configs = {
+    configs: [{ kind: "Topology", metadata: { name: "byterage" } }],
+  };
+  const { context, calls } = harness((c) =>
+    c.method === "GET" ? jsonResponse(200, configs) : jsonResponse(204, null)
+  );
+  await model.methods.config_prune.execute(
+    { namePrefix: "control-A-" },
+    context,
+  );
+  assertEquals(calls.filter((c) => c.method === "DELETE").length, 0);
+});
+
+Deno.test("config_prune tolerates a config deleted concurrently (400 not-found)", async () => {
+  const configs = {
+    configs: [{ kind: "Topology", metadata: { name: "control-A-base" } }],
+  };
+  // The list shows it, but the DELETE races: phenix reports a missing config
+  // as 400 (not 404) on delete — must be tolerated, not thrown.
+  const { context, calls } = harness((c) =>
+    c.method === "GET"
+      ? jsonResponse(200, configs)
+      : jsonResponse(400, { message: "config not found" })
+  );
+  const res = await model.methods.config_prune.execute(
+    { namePrefix: "control-A-" },
+    context,
+  );
+  assertEquals(res.dataHandles.length, 0);
+  assertEquals(calls.filter((c) => c.method === "DELETE").length, 1);
 });

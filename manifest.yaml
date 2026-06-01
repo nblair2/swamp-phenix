@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@nblair2/phenix"
-version: "2026.05.31.6"
+version: "2026.05.31.7"
 description: >
   Full sceptre-phenix control via the HTTP API, split into six models — config,
   experiment, scorch, vm, cluster and user: config CRUD
