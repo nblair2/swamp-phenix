@@ -16,6 +16,7 @@ import {
   ConfigSchema,
   configsFromData,
   GlobalArgsSchema,
+  PhenixApiError,
   type ReadDirLike,
   type ReadFileLike,
 } from "./_lib/phenix.ts";
@@ -73,6 +74,81 @@ function uploadKey(
 /** Sanitize a path-ish instance key (mirrors model.inst, applied to our key). */
 function instKey(key: string): string {
   return `${PREFIX}-${key.replace(/\.\./g, "").replace(/[/\\]/g, "_")}`;
+}
+
+/** Strip one layer of matching single/double quotes from a YAML scalar. */
+function unquote(s: string): string {
+  const t = s.trim();
+  if (
+    t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) ||
+      (t.startsWith("'") && t.endsWith("'")))
+  ) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+/** Read a top-level (column-0) `key: value` scalar from block YAML. */
+function topLevelScalar(text: string, key: string): string | null {
+  const m = text.match(new RegExp(`^${key}:[ \\t]+(.+?)[ \\t]*(?:#.*)?$`, "m"));
+  return m ? unquote(m[1]) : null;
+}
+
+/** Read `name:` from a direct child of the top-level `metadata:` block. */
+function metadataName(text: string): string | null {
+  let inMeta = false;
+  let childIndent = -1;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^metadata:[ \t]*(?:#.*)?$/.test(line)) {
+      inMeta = true;
+      continue;
+    }
+    if (!inMeta) continue;
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (/^\S/.test(line)) break; // a new column-0 key ends the metadata block
+    const indent = line.length - line.trimStart().length;
+    if (childIndent === -1) childIndent = indent; // first child sets the depth
+    if (indent !== childIndent) continue; // skip nested keys (e.g. annotations)
+    const m = line.match(/^[ \t]+name:[ \t]+(.+?)[ \t]*(?:#.*)?$/);
+    if (m) return unquote(m[1]);
+  }
+  return null;
+}
+
+/**
+ * Extract a config document's `{kind, name}` identity from its YAML or JSON
+ * text — used to address the named update endpoint (`PUT /configs/<kind>/
+ * <name>`) when a create finds the config already exists. Deliberately
+ * dependency-free (no YAML library, so no extra runtime permissions): it reads
+ * the top-level `kind:` and the `name:` under the top-level `metadata:` block,
+ * the shape every phenix config (Topology/Scenario/Experiment/Image/User) uses.
+ * Returns null if either is absent — callers then fall back to the Location
+ * header for identity.
+ */
+function configIdentity(text: string): { kind: string; name: string } | null {
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{")) {
+    try {
+      const o = asObject(JSON.parse(text));
+      const meta = asObject(o.metadata);
+      if (typeof o.kind === "string" && typeof meta.name === "string") {
+        return { kind: o.kind, name: meta.name };
+      }
+    } catch { /* not JSON — fall through to null */ }
+    return null;
+  }
+  const kind = topLevelScalar(text, "kind");
+  const name = metadataName(text);
+  return kind && name ? { kind, name } : null;
+}
+
+/** True if a phenix error body reports a name collision ("already exists"). */
+function isAlreadyExists(body: unknown): boolean {
+  const b = asObject(body);
+  return `${b.cause ?? ""} ${b.message ?? ""}`.toLowerCase().includes(
+    "already exists",
+  );
 }
 
 /** Read a local config document and guess its content type from the extension. */
@@ -141,6 +217,18 @@ const UpdateArgs = z.object({
   ),
 }).refine((a) => !!a.config !== !!a.file, {
   message: "provide exactly one of config or file",
+});
+
+const PruneArgs = z.object({
+  namePrefix: z.string().min(1).describe(
+    "Delete every config whose metadata.name starts with this prefix " +
+      "(e.g. 'control-A-' to clear one experiment's Topology/Scenario set). " +
+      "Required and non-empty so a prune can never match every config.",
+  ),
+  kinds: z.array(z.string()).optional().describe(
+    "Restrict the prune to these kinds (e.g. ['Topology','Scenario']); " +
+      "omit to match configs of any kind.",
+  ),
 });
 
 const methods = {
@@ -226,8 +314,10 @@ const methods = {
 
   config_upload_dir: {
     description:
-      "Upload every .yml/.yaml/.json config document in a local directory " +
-      "(one locked call instead of one per file), storing each created config",
+      "Upsert every .yml/.yaml/.json config document in a local directory " +
+      "(one locked call instead of one per file): create each, and if it " +
+      "already exists update it in place — so the upload is idempotent and " +
+      "re-runnable. Stores each config.",
     arguments: UploadDirArgs,
     execute: async (
       args: z.infer<typeof UploadDirArgs>,
@@ -249,14 +339,47 @@ const methods = {
           `${dir}/${file}`,
           readFile,
         );
-        const res = await client.postRaw("/api/v1/configs", text, contentType);
+        const id = configIdentity(text);
+        // Create with POST; phenix POST is create-only and answers 400/409
+        // "already exists" on a re-run, so fall back to updating the named
+        // endpoint (PUT /configs/<kind>/<name>) — an in-place upsert.
+        let res = await client.postRaw("/api/v1/configs", text, contentType, {
+          allowStatuses: [400, 409],
+        });
+        if (res.status === 400 || res.status === 409) {
+          if (isAlreadyExists(res.body) && id) {
+            res = await client.putRaw(
+              `/api/v1/configs/${encodeURIComponent(id.kind)}/${
+                encodeURIComponent(id.name)
+              }`,
+              text,
+              contentType,
+            );
+          } else {
+            // A genuine validation error (or no parseable identity to update):
+            // surface it rather than silently storing a non-result.
+            const b = asObject(res.body);
+            const msg = typeof b.message === "string"
+              ? b.message
+              : typeof b.cause === "string"
+              ? b.cause
+              : `upload failed for '${file}'`;
+            throw new PhenixApiError(msg, res.status);
+          }
+        }
         const created = asObject(res.body);
+        // Prefer the document's own identity (authoritative; matches
+        // config_list), then the Location header, then the file stem.
+        const key = id
+          ? `${id.kind.toLowerCase()}-${id.name}`
+          : uploadKey(res.location, created, file);
+        const data = Object.keys(created).length > 0
+          ? created
+          : id
+          ? { kind: id.kind, name: id.name }
+          : { file };
         handles.push(
-          await context.writeResource(
-            "config",
-            instKey(uploadKey(res.location, created, file)),
-            Object.keys(created).length > 0 ? created : { file },
-          ),
+          await context.writeResource("config", instKey(key), data),
         );
       }
       return { dataHandles: handles };
@@ -312,12 +435,50 @@ const methods = {
       return { dataHandles: [] };
     },
   },
+
+  config_prune: {
+    description:
+      "Delete every config whose name starts with namePrefix (optionally " +
+      "limited to given kinds). Lists then deletes in one locked call — a " +
+      "convention-based cleanup that adapts when configs are added, renamed " +
+      "or removed, and is a no-op when nothing matches (e.g. a fresh server). " +
+      "Tolerates a config that is removed concurrently (404).",
+    arguments: PruneArgs,
+    execute: async (
+      args: z.infer<typeof PruneArgs>,
+      context: ModelContext,
+    ): Promise<MethodResult> => {
+      const client = await clientFor(context);
+      const res = await client.get("/api/v1/configs");
+      const kinds = args.kinds?.map((k) => k.toLowerCase());
+      for (const entry of configsFromData(res.body)) {
+        const cfg = asObject(entry);
+        const meta = asObject(cfg.metadata);
+        const name = typeof meta.name === "string" ? meta.name : "";
+        const kind = typeof cfg.kind === "string" ? cfg.kind : "";
+        if (!name.startsWith(args.namePrefix)) continue;
+        if (kinds && kinds.length > 0 && !kinds.includes(kind.toLowerCase())) {
+          continue;
+        }
+        // Tolerate a config that vanished between the list and the delete —
+        // phenix reports a missing config as 400 (not 404) on delete.
+        await client.del(
+          `/api/v1/configs/${encodeURIComponent(kind)}/${
+            encodeURIComponent(name)
+          }`,
+          { allowStatuses: [400, 404] },
+        );
+      }
+      // A deletion has no resulting state to store (mirrors config_delete).
+      return { dataHandles: [] };
+    },
+  },
 };
 
 /** The `@nblair2/phenix/config` model. */
 export const model = {
   type: "@nblair2/phenix/config",
-  version: "2026.05.31.6",
+  version: "2026.05.31.7",
   globalArguments: GlobalArgsSchema,
   resources: {
     config: {
